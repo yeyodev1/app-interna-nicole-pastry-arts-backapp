@@ -6,9 +6,9 @@
  *   1. Mongo: `orders.invoiceInfo.documento` de los pedidos ya facturados.
  *   2. Contífico: GET /documento/ día por día (la API sólo filtra por fecha de emisión).
  *
- * Los secuenciales iguales o mayores a `CONTIFICO_SECUENCIAL_TECHO` (1 000 000) se
- * ignoran: son las 10 facturas 001000001–001000010 del 07–08/09/2026, fuera de la
- * secuencia real (ver src/config/contifico-emision.config.ts).
+ * Los secuenciales del rango `CONTIFICO_SECUENCIALES_EXCLUIDOS` (1000001–1000010) se
+ * ignoran: son las 10 facturas del 07–08/09/2026 fuera de la secuencia real
+ * (ver src/config/contifico-emision.config.ts).
  *
  * Uso:
  *   pnpm seed:invoice-sequence                          # Mongo + últimos 7 días de Contífico
@@ -32,7 +32,7 @@ import { OrderModel } from "../src/models/order.model";
 import { ContificoService } from "../src/services/contifico.service";
 import {
   CONTIFICO_SERIE,
-  CONTIFICO_SECUENCIAL_TECHO,
+  CONTIFICO_SECUENCIALES_EXCLUIDOS,
   buildDocumentNumber,
   parseSequential,
 } from "../src/config/contifico-emision.config";
@@ -88,7 +88,7 @@ async function main() {
   const desde = arg("desde") ? parseFechaDMY(arg("desde")!) : undefined;
   const daysBack = Number(arg("dias") || 7);
 
-  console.log(`📌 Serie ${CONTIFICO_SERIE} — techo de lectura ${CONTIFICO_SECUENCIAL_TECHO} (se ignoran secuenciales ≥ techo)`);
+  console.log(`📌 Serie ${CONTIFICO_SERIE} — se ignoran los secuenciales ${CONTIFICO_SECUENCIALES_EXCLUIDOS.desde}–${CONTIFICO_SECUENCIALES_EXCLUIDOS.hasta} (facturas fuera de secuencia del 07–08/09/2026)`);
 
   const current = await InvoiceSequenceModel.findOne({ source: SOURCE, serie: CONTIFICO_SERIE }).lean();
   const currentSeq = current?.lastSequential ?? 0;
