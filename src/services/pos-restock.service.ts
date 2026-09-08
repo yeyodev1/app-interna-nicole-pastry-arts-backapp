@@ -207,7 +207,8 @@ export class POSRestockService {
         category: "Transport" | "Storage" | "Production" | "Other";
       }>;
     }>,
-    submittedBy: string
+    submittedBy: string,
+    requestedByUserId?: string
   ): Promise<IPOSDailyEntry> {
     const date = parseDateStr(dateStr);
 
@@ -422,7 +423,119 @@ export class POSRestockService {
       }
     }
 
+    // 4. Requerimiento interno para Bodega: los ítems de categoría "Bodega" del cierre
+    // deben llegar a la pantalla "Requerimientos Internos" de Supply Chain. El pedido
+    // "Restock-Bodega" de arriba sólo lo ve Producción, así que sin esto Bodega nunca
+    // se enteraba de lo que pedía el punto de venta.
+    try {
+      await this.syncBodegaRequisition({
+        branch,
+        closingDate: date,
+        neededForDate: targetDate,
+        items: restockItems.filter((i) => i.category === "Bodega"),
+        objectiveMap,
+        submittedBy,
+        requestedByUserId,
+      });
+    } catch (err: any) {
+      // No se bloquea el cierre por esto: el cierre ya quedó guardado.
+      console.error(`❌ [POS] No se pudo generar el requerimiento a Bodega de ${branch} (${dateStr}):`, err?.message || err);
+    }
+
     return result as any;
+  }
+
+  /**
+   * Crea o actualiza el requerimiento interno automático (source = POS_CLOSING) de
+   * una sucursal para un día de cierre.
+   *
+   * - Si el cierre se reenvía, se actualizan los ítems mientras Bodega no lo haya
+   *   despachado. Si ya está DESPACHADO/CONFIRMADO no se toca.
+   * - Sin ítems de Bodega: se cancela el requerimiento pendiente si existía.
+   * - Cada ítem se vincula a una materia prima por `contificoId` del objetivo o por
+   *   nombre (sin distinguir mayúsculas). Si no calza, va sin materia prima: Bodega lo
+   *   ve y lo despacha igual, pero no descuenta stock.
+   */
+  private async syncBodegaRequisition(params: {
+    branch: string;
+    closingDate: Date;
+    neededForDate: Date;
+    items: Array<{ productName: string; unit: string; pedidoFinal: number }>;
+    objectiveMap: Record<string, any>;
+    submittedBy: string;
+    requestedByUserId?: string;
+  }): Promise<void> {
+    const { branch, closingDate, neededForDate, items, objectiveMap, submittedBy, requestedByUserId } = params;
+
+    const existing = await models.internalRequisitions.findOne({
+      source: "POS_CLOSING",
+      branch,
+      closingDate,
+    });
+
+    if (existing && ["DISPATCHED", "CONFIRMED"].includes(existing.status)) {
+      console.log(`ℹ️ [POS] Requerimiento a Bodega de ${branch} ya está ${existing.status}; no se modifica.`);
+      return;
+    }
+
+    if (items.length === 0) {
+      if (existing && existing.status !== "CANCELLED") {
+        existing.status = "CANCELLED";
+        existing.notes = `${existing.notes ? existing.notes + " · " : ""}Cancelado: el cierre se reenvió sin ítems de Bodega.`;
+        await existing.save();
+      }
+      return;
+    }
+
+    // Vincular con materias primas
+    const sinVincular: string[] = [];
+    const reqItems: any[] = [];
+    for (const item of items) {
+      const contificoId = objectiveMap[item.productName]?.contificoId;
+      let material: any = null;
+      if (contificoId) {
+        material = await models.rawMaterials.findOne({ contificoId }).lean();
+      }
+      if (!material) {
+        const escaped = item.productName.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        material = await models.rawMaterials.findOne({ name: { $regex: `^${escaped}$`, $options: "i" } }).lean();
+      }
+      if (!material) sinVincular.push(item.productName);
+
+      reqItems.push({
+        material: material?._id,
+        name: item.productName,
+        quantity: item.pedidoFinal,
+        unit: material?.unit || item.unit || "unidad",
+      });
+    }
+
+    const fecha = closingDate.toISOString().slice(0, 10).split("-").reverse().join("/");
+    const notes = [
+      `Generado automáticamente desde el cierre de producción de ${branch} (${fecha}).`,
+      sinVincular.length ? `Sin materia prima vinculada (no descuentan stock): ${sinVincular.join(", ")}.` : "",
+    ].filter(Boolean).join(" ");
+
+    const payload = {
+      source: "POS_CLOSING" as const,
+      branch,
+      closingDate,
+      requestedBy: requestedByUserId || undefined,
+      requestedByName: submittedBy && submittedBy !== "POS User" ? `${submittedBy} · ${branch}` : `Cierre POS · ${branch}`,
+      area: `Punto de venta ${branch}`,
+      neededForDate,
+      items: reqItems,
+      notes,
+    };
+
+    if (existing) {
+      existing.set({ ...payload, status: "REQUESTED" });
+      await existing.save();
+      console.log(`🔄 [POS] Requerimiento a Bodega de ${branch} (${fecha}) actualizado: ${reqItems.length} ítems.`);
+    } else {
+      await models.internalRequisitions.create({ ...payload, status: "REQUESTED" });
+      console.log(`✅ [POS] Requerimiento a Bodega de ${branch} (${fecha}) creado: ${reqItems.length} ítems.`);
+    }
   }
 
   /**

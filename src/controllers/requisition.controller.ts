@@ -135,6 +135,12 @@ export async function dispatchRequisition(req: AuthRequest, res: Response, next:
       if (override?.itemNote) item.itemNote = override.itemNote;
       if (qty <= 0) continue;
 
+      // Ítems sin materia prima vinculada (vienen del cierre POS con un nombre que no
+      // calza en el catálogo): se despachan pero no descuentan stock.
+      if (!item.material) {
+        item.itemNote = item.itemNote || "Sin materia prima vinculada: no descuenta stock";
+        continue;
+      }
       const material = await RawMaterialModel.findById(item.material);
       if (!material) {
         return res.status(404).send({ message: `Materia prima no encontrada: ${item.name}` });
@@ -168,6 +174,7 @@ export async function dispatchRequisition(req: AuthRequest, res: Response, next:
       // Reflejar los egresos en Contífico (solo materiales vinculados)
       const materialsById = new Map<string, any>();
       for (const item of requisition.items) {
+        if (!item.material) continue;
         const mat = await RawMaterialModel.findById(item.material).lean();
         if (mat) materialsById.set(String(mat._id), mat);
       }
