@@ -5,8 +5,10 @@ import { SellerModel } from "../models/seller.model";
 import {
   CONTIFICO_SERIE,
   CONTIFICO_SECUENCIAL_MINIMO,
+  CONTIFICO_SECUENCIALES_EXCLUIDOS,
   buildDocumentNumber,
   parseSequential,
+  isExcludedSequential,
 } from "../config/contifico-emision.config";
 import { CONTIFICO_CUENTA_BANCARIA_TRA } from "../config/contifico-cobro.config";
 
@@ -633,11 +635,27 @@ export class ContificoService {
       console.log(`✅ [${this.source}] Contador de la serie ${serie} sembrado en ${seed}`);
     }
 
-    const updated = await InvoiceSequenceModel.findOneAndUpdate(
+    let updated = await InvoiceSequenceModel.findOneAndUpdate(
       { source: this.source, serie },
       { $inc: { lastSequential: 1 } },
       { new: true }
     );
+
+    // Saltar las 10 facturas ya emitidas en 1000001–1000010: el contador brinca al
+    // final del rango y se vuelve a incrementar. `$max` es idempotente si otro
+    // request concurrente ya lo hizo.
+    if (isExcludedSequential(updated!.lastSequential)) {
+      await InvoiceSequenceModel.updateOne(
+        { source: this.source, serie },
+        { $max: { lastSequential: CONTIFICO_SECUENCIALES_EXCLUIDOS.hasta } }
+      );
+      updated = await InvoiceSequenceModel.findOneAndUpdate(
+        { source: this.source, serie },
+        { $inc: { lastSequential: 1 } },
+        { new: true }
+      );
+      console.log(`↪️ [${this.source}] Secuencial dentro del rango excluido; se salta a ${updated!.lastSequential}`);
+    }
 
     return buildDocumentNumber(updated!.lastSequential);
   }
@@ -672,9 +690,9 @@ export class ContificoService {
    * o los últimos `daysBack` días, o desde `desde` hasta `hasta` (hoy por defecto)
    * cuando hace falta barrer todo el historial (cada día son ~2 MB y varios segundos).
    *
-   * Se ignoran los secuenciales iguales o mayores al techo
-   * (`CONTIFICO_SECUENCIAL_TECHO`, ver contifico-emision.config.ts): son las facturas
-   * 001000001–001000010 del 07–08/09/2026, fuera de la secuencia real.
+   * Se ignoran los secuenciales del rango excluido (`CONTIFICO_SECUENCIALES_EXCLUIDOS`,
+   * ver contifico-emision.config.ts): las facturas 001000001–001000010 del
+   * 07–08/09/2026, fuera de la secuencia real.
    *
    * Devuelve al menos `floor` (por defecto `CONTIFICO_SECUENCIAL_MINIMO`).
    */

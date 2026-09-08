@@ -41,7 +41,7 @@ export const CONTIFICO_SERIE = `${CONTIFICO_ESTABLECIMIENTO}-${CONTIFICO_PUNTO_E
  *   las justifica ante el SRI si hace falta, no se anulan.
  *
  * 08/09/2026: el contador se re-siembra con el mayor secuencial REAL emitido en la
- *   serie (por debajo del techo), leído de todo el historial de Contífico y de los
+ *   serie (excluyendo esas 10), leído de todo el historial de Contífico y de los
  *   pedidos en Mongo. Desde ahí la numeración es correlativa y, como el sorteo nunca
  *   superó ese máximo, no puede chocar con un número ya autorizado.
  *   Correr `pnpm seed:invoice-sequence -- --desde 14/01/2026` para hacerlo.
@@ -55,13 +55,27 @@ export const CONTIFICO_SERIE = `${CONTIFICO_ESTABLECIMIENTO}-${CONTIFICO_PUNTO_E
 export const CONTIFICO_SECUENCIAL_MINIMO = Number(process.env.CONTIFICO_SECUENCIAL_MINIMO || 0);
 
 /**
- * Techo de lectura: al leer documentos de Contífico se IGNORAN los secuenciales
- * iguales o mayores a este valor. Sirve para que las 10 facturas 001000001–001000010
- * del 07–08/09/2026 (ver historia arriba) no vuelvan a arrastrar el contador a
- * 1 000 000 en una re-sincronización. Al ritmo actual la serie real tardará décadas
- * en acercarse a este número; si algún día pasa, subir el techo por env var.
+ * Secuenciales EXCLUIDOS de la serie: las 10 facturas 001000001–001000010 del
+ * 07–08/09/2026 (ver historia arriba). Se saltan al asignar números y se ignoran al
+ * leer Contífico, para que no arrastren el contador. Formato env: "1000001-1000010".
+ *
+ * El máximo real de la serie el 08/09/2026 es ~999 102, así que la numeración
+ * correlativa llegará a 1 000 000 en pocos meses; por eso NO se usa un techo
+ * genérico sino este rango exacto.
  */
-export const CONTIFICO_SECUENCIAL_TECHO = Number(process.env.CONTIFICO_SECUENCIAL_TECHO || 1_000_000);
+function parseRango(raw: string): { desde: number; hasta: number } {
+  const [a, b] = raw.split("-").map((n) => Number(n.trim()));
+  const desde = Number.isFinite(a) && a > 0 ? a : 0;
+  const hasta = Number.isFinite(b) && b >= desde ? b : desde;
+  return { desde, hasta };
+}
+export const CONTIFICO_SECUENCIALES_EXCLUIDOS = parseRango(process.env.CONTIFICO_SECUENCIALES_EXCLUIDOS || "1000001-1000010");
+
+/** `true` si el secuencial cae dentro del rango excluido. */
+export function isExcludedSequential(seq: number): boolean {
+  const { desde, hasta } = CONTIFICO_SECUENCIALES_EXCLUIDOS;
+  return desde > 0 && seq >= desde && seq <= hasta;
+}
 
 /** Arma el número completo del documento, ej. "001-001-000975843". */
 export function buildDocumentNumber(sequential: number): string {
@@ -71,13 +85,13 @@ export function buildDocumentNumber(sequential: number): string {
 /**
  * Extrae el secuencial de un número de documento de la serie dada.
  * Devuelve `null` si el documento no pertenece a la serie, no es numérico o está
- * en o por encima del techo (`CONTIFICO_SECUENCIAL_TECHO`).
+ * dentro del rango excluido (`CONTIFICO_SECUENCIALES_EXCLUIDOS`).
  */
 export function parseSequential(documento: unknown, serie: string = CONTIFICO_SERIE): number | null {
   const numero = String(documento ?? "").trim();
   if (!numero.startsWith(`${serie}-`)) return null;
   const seq = Number(numero.slice(serie.length + 1));
   if (!Number.isFinite(seq) || seq <= 0) return null;
-  if (seq >= CONTIFICO_SECUENCIAL_TECHO) return null;
+  if (isExcludedSequential(seq)) return null;
   return seq;
 }
