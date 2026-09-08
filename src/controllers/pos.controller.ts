@@ -256,7 +256,8 @@ export async function submitRestockDailyEntry(req: Request, res: Response): Prom
       res.status(HttpStatusCode.BadRequest).send({ message: "branch, date, submittedBy, and items[] are required." });
       return;
     }
-    const data = await posRestockService.submitDailyEntry(branch, date, items, submittedBy);
+    const requestedByUserId = (req as any).user?.id || (req as any).user?._id;
+    const data = await posRestockService.submitDailyEntry(branch, date, items, submittedBy, requestedByUserId);
     res.status(HttpStatusCode.Ok).send({ message: "Daily entry submitted.", data });
   } catch (error: any) {
     console.error("Error submitting daily entry:", error);
