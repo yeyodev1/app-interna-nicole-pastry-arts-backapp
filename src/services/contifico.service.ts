@@ -6,6 +6,7 @@ import {
   CONTIFICO_SERIE,
   CONTIFICO_SECUENCIAL_MINIMO,
   buildDocumentNumber,
+  parseSequential,
 } from "../config/contifico-emision.config";
 import { CONTIFICO_CUENTA_BANCARIA_TRA } from "../config/contifico-cobro.config";
 
@@ -607,15 +608,23 @@ export class ContificoService {
    *
    * Antes se generaba con `Math.random()`, lo que podía repetir un secuencial ya
    * emitido o saltar cientos de miles de números dentro de la serie del SRI.
-   * Ahora el contador vive en Mongo y se incrementa de forma atómica; la primera
-   * vez se siembra con el último secuencial realmente emitido en Contífico.
+   * Ahora el contador vive en Mongo y se incrementa de forma atómica. Si no existe
+   * todavía, se siembra con el último secuencial realmente emitido en Contífico
+   * (lo normal es sembrarlo antes con `pnpm seed:invoice-sequence`).
    */
   async nextInvoiceNumber(): Promise<string> {
     const serie = CONTIFICO_SERIE;
 
     const existing = await InvoiceSequenceModel.findOne({ source: this.source, serie });
     if (!existing) {
-      const seed = await this.fetchLastSequentialFromContifico(serie);
+      const seed = await this.fetchLastSequentialFromContifico(serie, { daysBack: 7 });
+      if (seed <= 0) {
+        // Sin contador y sin nada leído: no inventar un número. Se aborta la factura
+        // (createInvoice devuelve el error) hasta que alguien siembre el contador.
+        throw new Error(
+          `Contador de la serie ${serie} no sembrado y Contífico no devolvió documentos recientes. Correr: pnpm seed:invoice-sequence -- --desde 14/01/2026`
+        );
+      }
       await InvoiceSequenceModel.updateOne(
         { source: this.source, serie },
         { $setOnInsert: { source: this.source, serie, lastSequential: seed } },
@@ -634,57 +643,89 @@ export class ContificoService {
   }
 
   /**
-   * Vuelve a sembrar el contador desde Contífico. Se llama cuando la API rechaza
-   * el documento por un problema de secuencia, para que el siguiente intento
-   * (el próximo batch) arranque desde el número correcto.
+   * Re-sincroniza el contador contra Contífico. Se llama cuando la API rechaza el
+   * documento por un problema de secuencia, para que el siguiente intento arranque
+   * por encima de todo lo que Contífico ya tiene.
+   *
+   * Sólo SUBE el contador (`$max`): nunca lo baja. Bajarlo es la única operación que
+   * puede reutilizar un número y queda reservada al script `seed-invoice-sequence`
+   * con `--force`, después de barrer todo el historial.
    */
   async resyncInvoiceSequence(): Promise<number> {
     const serie = CONTIFICO_SERIE;
-    const last = await this.fetchLastSequentialFromContifico(serie);
+    const last = await this.fetchLastSequentialFromContifico(serie, { daysBack: 2 });
     await InvoiceSequenceModel.updateOne(
       { source: this.source, serie },
-      { $set: { lastSequential: last }, $setOnInsert: { source: this.source, serie } },
+      { $max: { lastSequential: last }, $setOnInsert: { source: this.source, serie } },
       { upsert: true }
     );
-    console.log(`🔄 [${this.source}] Contador de la serie ${serie} re-sincronizado en ${last}`);
-    return last;
+    const after = await InvoiceSequenceModel.findOne({ source: this.source, serie }).lean();
+    const value = after?.lastSequential ?? last;
+    console.log(`🔄 [${this.source}] Contador de la serie ${serie} re-sincronizado en ${value} (Contífico: ${last})`);
+    return value;
   }
 
   /**
-   * Busca en Contífico el mayor secuencial ya emitido para una serie y lo devuelve
-   * elevado a `CONTIFICO_SECUENCIAL_MINIMO`.
+   * Busca en Contífico el mayor secuencial ya emitido para una serie.
    *
-   * El piso importa más que la búsqueda: el endpoint sólo filtra por fecha de
-   * emisión, así que ninguna ventana razonable prueba haber visto el máximo
-   * histórico. El piso (1 000 000) está por encima de todo el rango que usaba el
-   * sorteo anterior, de modo que el resultado es seguro aunque el barrido no
-   * encuentre nada o la API esté caída.
+   * El endpoint sólo filtra por fecha de emisión, así que se recorre día por día:
+   * o los últimos `daysBack` días, o desde `desde` hasta `hasta` (hoy por defecto)
+   * cuando hace falta barrer todo el historial (cada día son ~2 MB y varios segundos).
    *
-   * Cada día son ~2 MB de respuesta y decenas de segundos, así que conviene
-   * sembrar el contador con `pnpm seed:invoice-sequence` antes de desplegar
-   * en lugar de dejar que ocurra dentro de la primera factura.
+   * Se ignoran los secuenciales iguales o mayores al techo
+   * (`CONTIFICO_SECUENCIAL_TECHO`, ver contifico-emision.config.ts): son las facturas
+   * 001000001–001000010 del 07–08/09/2026, fuera de la secuencia real.
+   *
+   * Devuelve al menos `floor` (por defecto `CONTIFICO_SECUENCIAL_MINIMO`).
    */
-  async fetchLastSequentialFromContifico(serie: string = CONTIFICO_SERIE, daysBack: number = 2): Promise<number> {
-    let max = CONTIFICO_SECUENCIAL_MINIMO;
+  async fetchLastSequentialFromContifico(
+    serie: string = CONTIFICO_SERIE,
+    options: number | {
+      daysBack?: number;
+      desde?: Date;
+      hasta?: Date;
+      floor?: number;
+      onDay?: (fecha: string, maxDia: number, acumulado: number) => void;
+    } = {}
+  ): Promise<number> {
+    const opts = typeof options === "number" ? { daysBack: options } : options;
+    const floor = opts.floor ?? CONTIFICO_SECUENCIAL_MINIMO;
+    let max = floor;
 
-    for (let i = 0; i < daysBack; i++) {
-      const day = new Date();
-      day.setDate(day.getDate() - i);
+    const dias: Date[] = [];
+    if (opts.desde) {
+      const hasta = opts.hasta ?? new Date();
+      for (const d = new Date(opts.desde); d <= hasta; d.setDate(d.getDate() + 1)) {
+        dias.push(new Date(d));
+      }
+    } else {
+      const daysBack = opts.daysBack ?? 2;
+      for (let i = 0; i < daysBack; i++) {
+        const day = new Date();
+        day.setDate(day.getDate() - i);
+        dias.push(day);
+      }
+    }
+
+    for (const day of dias) {
       const fecha = day.toLocaleDateString("en-GB"); // DD/MM/YYYY
+      let maxDia = 0;
 
       try {
         const docs = await this.getDocuments({ fecha_emision: fecha, tipo_registro: "CLI" });
-        if (!Array.isArray(docs)) continue;
-
-        for (const doc of docs) {
-          const numero: string = doc?.documento || "";
-          if (!numero.startsWith(`${serie}-`)) continue;
-          const seq = Number(numero.slice(serie.length + 1));
-          if (Number.isFinite(seq) && seq > max) max = seq;
+        if (Array.isArray(docs)) {
+          for (const doc of docs) {
+            const seq = parseSequential(doc?.documento, serie);
+            if (seq === null) continue;
+            if (seq > maxDia) maxDia = seq;
+          }
         }
       } catch (err: any) {
         console.warn(`⚠️ [${this.source}] No se pudo leer documentos de ${fecha}: ${err.message}`);
       }
+
+      if (maxDia > max) max = maxDia;
+      opts.onDay?.(fecha, maxDia, max);
     }
 
     return max;

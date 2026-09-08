@@ -63,7 +63,7 @@ All routes are mounted under `/api` prefix. The flow is:
 - **Auth middleware** (`src/middlewares/auth.middleware.ts`) — Verifies JWT Bearer token, attaches decoded payload to `req.user` (typed as `AuthRequest`)
 - **Custom errors** — Throw `CustomError` (from `src/errors/customError.error.ts`) with status code; caught by `globalErrorHandler`
 - **Contífico service** (`src/services/contifico.service.ts`) — External ERP integration with in-memory cache (1h TTL for products/categories). Credentials: `CONTIFICO_API_KEY`, `CONTIFICO_TOKEN`
-- **Numeración de facturas** — El número sale de `nextInvoiceNumber()`: serie fija (001-001 = CDP) + contador atómico en Mongo (`InvoiceSequence`), sembrado con el último secuencial real de Contífico. Sembrar con `pnpm seed:invoice-sequence` antes de desplegar cambios de serie.
+- **Numeración de facturas** — El número sale de `nextInvoiceNumber()`: serie fija (001-001 = CDP) + contador atómico en Mongo (`InvoiceSequence`). El contador continúa la secuencia real de la serie: se siembra/corrige con `pnpm seed:invoice-sequence -- --desde 14/01/2026` (máximo entre Mongo y todo el historial de Contífico). La re-sincronización automática sólo sube el contador (`$max`); bajarlo es manual (`--force`). Los secuenciales ≥ `CONTIFICO_SECUENCIAL_TECHO` (1 000 000: las 10 facturas 001000001–001000010 del 07–08/09/2026) se ignoran al leer Contífico. Historia completa en `src/config/contifico-emision.config.ts`.
 - **Vendedor en la factura** — `resolveVendedorPayload()` mapea el pedido a una persona `es_vendedor` de Contífico (catálogo `Seller`, expuesto en `/api/sellers`) y lo envía como `vendedor_id`. Es la base del reporte de comisiones.
 - **File uploads** — Multer middleware saves to `uploads/` dir with unique filenames (100MB limit, max 10 files)
 - **Startup** — `index.ts` connects to MongoDB, seeds default users, then starts the HTTP server (10min timeout)
@@ -74,7 +74,7 @@ Required: `DB_URI`, `JWT_SECRET`, `CONTIFICO_API_KEY`, `CONTIFICO_TOKEN`. Check 
 
 Optional, punto de emisión de facturas (`src/config/contifico-emision.config.ts`):
 `CONTIFICO_ESTABLECIMIENTO` (default `001`), `CONTIFICO_PUNTO_EMISION` (default `001` = Matriz / CDP),
-`CONTIFICO_SECUENCIAL_MINIMO` (piso del contador si Contífico no devuelve documentos de la serie).
+`CONTIFICO_SECUENCIAL_MINIMO` (piso opcional del contador, default 0), `CONTIFICO_SECUENCIAL_TECHO` (default 1 000 000: secuenciales iguales o mayores se ignoran al leer Contífico).
 
 ### Models (Mongoose)
 

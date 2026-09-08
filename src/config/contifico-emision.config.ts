@@ -27,23 +27,57 @@ export const CONTIFICO_PUNTO_EMISION = (process.env.CONTIFICO_PUNTO_EMISION || "
 export const CONTIFICO_SERIE = `${CONTIFICO_ESTABLECIMIENTO}-${CONTIFICO_PUNTO_EMISION}`;
 
 /**
- * Piso duro del secuencial: 1 000 000.
+ * Historia de la numeración de la serie 001-001, para entender los dos límites de abajo.
  *
- * Hasta el 04/09/2026 el número se sorteaba con `Math.random()` dentro del rango
- * 100000–999999, así que la serie 001-001 quedó salpicada de números sin orden a
- * lo largo de TODO ese rango (muestra real de 4 días: 23 facturas entre 116 943 y
- * 975 842, sin secuencia). No hay forma barata de conocer el máximo histórico
- * exacto —la API sólo filtra por fecha de emisión— y adivinarlo arriesga emitir
- * un secuencial duplicado ante el SRI.
+ * 14/01/2026 – 04/09/2026: el número se sorteaba con `Math.random()` entre 100000 y
+ *   999999. No era un secuencial: la serie quedó salpicada de números sin orden a lo
+ *   largo de todo ese rango, y ninguna factura pasó de 999 999.
  *
- * Arrancar en 1 000 000 resuelve el problema sin tener que reconstruir el pasado:
- * queda por encima de cualquier número que el sorteo pudo haber generado, así que
- * la colisión es imposible por construcción. Deja un hueco en la serie, que el SRI
- * permite; lo que no permite es un número repetido.
+ * 04/09/2026: se reemplazó el sorteo por el contador atómico en Mongo (`InvoiceSequence`),
+ *   pero arrancando en 1 000 000 para no tener que reconstruir el máximo histórico.
+ *   Resultado: las facturas 001-001-001000001 … 001000010 (07 y 08/09/2026). La
+ *   clienta lo leyó como que la numeración "volvió a 1" y pidió que la secuencia
+ *   continúe desde donde venía. Esas 10 facturas quedan emitidas y autorizadas; ella
+ *   las justifica ante el SRI si hace falta, no se anulan.
+ *
+ * 08/09/2026: el contador se re-siembra con el mayor secuencial REAL emitido en la
+ *   serie (por debajo del techo), leído de todo el historial de Contífico y de los
+ *   pedidos en Mongo. Desde ahí la numeración es correlativa y, como el sorteo nunca
+ *   superó ese máximo, no puede chocar con un número ya autorizado.
+ *   Correr `pnpm seed:invoice-sequence -- --desde 14/01/2026` para hacerlo.
  */
-export const CONTIFICO_SECUENCIAL_MINIMO = Number(process.env.CONTIFICO_SECUENCIAL_MINIMO || 1_000_000);
 
-/** Arma el número completo del documento, ej. "001-001-001000001". */
+/**
+ * Piso opcional del contador. Sólo se usa al sembrar o re-sincronizar desde Contífico
+ * cuando la lectura no encuentra nada mayor. Por defecto 0 (sin piso): el número
+ * correcto sale de la lectura real, no de una constante.
+ */
+export const CONTIFICO_SECUENCIAL_MINIMO = Number(process.env.CONTIFICO_SECUENCIAL_MINIMO || 0);
+
+/**
+ * Techo de lectura: al leer documentos de Contífico se IGNORAN los secuenciales
+ * iguales o mayores a este valor. Sirve para que las 10 facturas 001000001–001000010
+ * del 07–08/09/2026 (ver historia arriba) no vuelvan a arrastrar el contador a
+ * 1 000 000 en una re-sincronización. Al ritmo actual la serie real tardará décadas
+ * en acercarse a este número; si algún día pasa, subir el techo por env var.
+ */
+export const CONTIFICO_SECUENCIAL_TECHO = Number(process.env.CONTIFICO_SECUENCIAL_TECHO || 1_000_000);
+
+/** Arma el número completo del documento, ej. "001-001-000975843". */
 export function buildDocumentNumber(sequential: number): string {
   return `${CONTIFICO_SERIE}-${String(sequential).padStart(9, "0")}`;
+}
+
+/**
+ * Extrae el secuencial de un número de documento de la serie dada.
+ * Devuelve `null` si el documento no pertenece a la serie, no es numérico o está
+ * en o por encima del techo (`CONTIFICO_SECUENCIAL_TECHO`).
+ */
+export function parseSequential(documento: unknown, serie: string = CONTIFICO_SERIE): number | null {
+  const numero = String(documento ?? "").trim();
+  if (!numero.startsWith(`${serie}-`)) return null;
+  const seq = Number(numero.slice(serie.length + 1));
+  if (!Number.isFinite(seq) || seq <= 0) return null;
+  if (seq >= CONTIFICO_SECUENCIAL_TECHO) return null;
+  return seq;
 }
