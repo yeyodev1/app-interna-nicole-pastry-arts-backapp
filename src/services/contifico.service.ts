@@ -685,7 +685,8 @@ export class ContificoService {
       desde?: Date;
       hasta?: Date;
       floor?: number;
-      onDay?: (fecha: string, maxDia: number, acumulado: number) => void;
+      /** `ok = false` cuando algún request de ese día falló y el máximo del día puede estar incompleto. */
+      onDay?: (fecha: string, maxDia: number, acumulado: number, ok: boolean) => void;
     } = {}
   ): Promise<number> {
     const opts = typeof options === "number" ? { daysBack: options } : options;
@@ -707,25 +708,49 @@ export class ContificoService {
       }
     }
 
+    // La API pagina (`result_size` / `result_page`). Se recorren todas las páginas del
+    // día; sin esto un día con muchas facturas podría dejar fuera el máximo real.
+    const PAGE_SIZE = 500;
+    const MAX_PAGES = 40;
+
     for (const day of dias) {
       const fecha = day.toLocaleDateString("en-GB"); // DD/MM/YYYY
       let maxDia = 0;
+      let ok = true;
+      const seenIds = new Set<string>();
 
-      try {
-        const docs = await this.getDocuments({ fecha_emision: fecha, tipo_registro: "CLI" });
-        if (Array.isArray(docs)) {
-          for (const doc of docs) {
-            const seq = parseSequential(doc?.documento, serie);
-            if (seq === null) continue;
-            if (seq > maxDia) maxDia = seq;
-          }
+      for (let page = 1; page <= MAX_PAGES; page++) {
+        let docs: any[];
+        try {
+          const res = await this.getDocuments({
+            fecha_emision: fecha,
+            tipo_registro: "CLI",
+            result_size: PAGE_SIZE,
+            result_page: page,
+          });
+          docs = Array.isArray(res) ? res : [];
+        } catch (err: any) {
+          ok = false;
+          console.warn(`⚠️ [${this.source}] No se pudo leer documentos de ${fecha} (página ${page}): ${err.message}`);
+          break;
         }
-      } catch (err: any) {
-        console.warn(`⚠️ [${this.source}] No se pudo leer documentos de ${fecha}: ${err.message}`);
+
+        let nuevos = 0;
+        for (const doc of docs) {
+          const id = String(doc?.id ?? doc?.documento ?? "");
+          if (id && seenIds.has(id)) continue; // la API repitió resultados: no seguir paginando
+          if (id) seenIds.add(id);
+          nuevos++;
+          const seq = parseSequential(doc?.documento, serie);
+          if (seq !== null && seq > maxDia) maxDia = seq;
+        }
+
+        // Última página: vino incompleta, vacía, o sólo repitió lo ya visto.
+        if (docs.length < PAGE_SIZE || nuevos === 0) break;
       }
 
       if (maxDia > max) max = maxDia;
-      opts.onDay?.(fecha, maxDia, max);
+      opts.onDay?.(fecha, maxDia, max, ok);
     }
 
     return max;

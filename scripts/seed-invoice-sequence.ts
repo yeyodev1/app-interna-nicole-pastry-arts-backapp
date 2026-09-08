@@ -56,8 +56,13 @@ function parseFechaDMY(raw: string): Date {
 }
 
 async function maxFromMongo(): Promise<{ max: number; count: number; documento?: string }> {
+  // Sólo pedidos facturados en la cuenta de Nicole: Sucree tiene su propia serie
+  // 001-001 en otra empresa y no debe mezclarse en este contador.
   const cursor = OrderModel.find(
-    { "invoiceInfo.documento": { $regex: `^${CONTIFICO_SERIE}-` } },
+    {
+      "invoiceInfo.documento": { $regex: `^${CONTIFICO_SERIE}-` },
+      contificoSource: { $ne: "sucree" },
+    },
     { "invoiceInfo.documento": 1 }
   ).lean().cursor();
 
@@ -98,15 +103,20 @@ async function main() {
     ? `desde ${desde.toLocaleDateString("en-GB")} hasta hoy`
     : `últimos ${daysBack} días`;
   console.log(`🔎 Leyendo documentos en Contífico (${rango})... cada día tarda varios segundos.`);
+  const diasFallidos: string[] = [];
   const contifico = await service.fetchLastSequentialFromContifico(CONTIFICO_SERIE, {
     daysBack,
     desde,
     floor: 0,
-    onDay: (fecha, maxDia, acumulado) => {
-      console.log(`   ${fecha}: máx del día ${maxDia || "-"} · acumulado ${acumulado}`);
+    onDay: (fecha, maxDia, acumulado, ok) => {
+      if (!ok) diasFallidos.push(fecha);
+      console.log(`   ${fecha}: máx del día ${maxDia || "-"} · acumulado ${acumulado}${ok ? "" : "  ⚠️ lectura incompleta"}`);
     },
   });
   console.log(`   → máximo en Contífico: ${contifico}`);
+  if (diasFallidos.length) {
+    console.log(`   ⚠️ ${diasFallidos.length} día(s) no se pudieron leer completos: ${diasFallidos.join(", ")}`);
+  }
 
   const target = Math.max(mongo.max, contifico, manual);
   if (target <= 0) {
@@ -123,6 +133,10 @@ async function main() {
   }
   if (target < currentSeq) {
     console.log(`⬇️  Esto BAJA el contador de ${currentSeq} a ${target}.`);
+    if (diasFallidos.length) {
+      console.error("   ❌ Hubo días que no se pudieron leer completos. Con el barrido incompleto no es seguro bajar el contador: vuelve a correr el script.");
+      process.exit(3);
+    }
     if (!desde) {
       console.log("   ⚠️  Sólo se leyeron los últimos días de Contífico. Para bajar el contador con seguridad hay que barrer todo el historial: --desde 14/01/2026");
     }
