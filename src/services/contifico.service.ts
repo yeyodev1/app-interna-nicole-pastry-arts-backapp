@@ -11,6 +11,7 @@ import {
   isExcludedSequential,
 } from "../config/contifico-emision.config";
 import { CONTIFICO_CUENTA_BANCARIA_TRA } from "../config/contifico-cobro.config";
+import { isPrecioIvaIncluido } from "../config/precio-final.config";
 
 export class ContificoService {
   private apiKey: string;
@@ -90,6 +91,24 @@ export class ContificoService {
   }
 
   /**
+   * Lista personas de la cuenta. `params` pasa tal cual a la API
+   * (ej. `{ es_vendedor: true }` para traer sólo vendedores).
+   */
+  async getPersonas(params: Record<string, any> = {}): Promise<any[]> {
+    try {
+      const response = await axios.get(`${this.baseUrl}/persona/`, {
+        headers: { Authorization: this.apiKey },
+        params,
+      });
+      const data = response.data;
+      return Array.isArray(data) ? data : data?.results || [];
+    } catch (error: any) {
+      console.error(`❌ [${this.source}] Error listando personas:`, error.response?.data || error.message);
+      return [];
+    }
+  }
+
+  /**
    * Busca una persona en Contifico por cédula/RUC.
    * Devuelve el primer resultado o null si no existe.
    */
@@ -151,30 +170,15 @@ export class ContificoService {
         const precio = Number(p.price);
         // const totalLine = cantidad * precio; // This line will be moved/recalculated later
 
-        // Check if product is Delivery
-        const isDelivery = p.name.toLowerCase().includes('delivery');
+        // Todo se factura con IVA 15%: mandar 0% hace que Contífico rechace la
+        // línea (error 1098).
+        const porcentaje_iva = 15;
 
-        // CONTIFICO CONFIG: Delivery is 15% Taxable.
-        // User wants $5.00 flat. We must treat price as "Tax Inclusive".
-        let hasIva = !isDelivery; // Default logic
-
-        if (isDelivery) {
-          hasIva = true; // Force True to satisfy API (Avoid Error 1098)
-          // Back-calculate price so Total = User Price
-          // Price = 5 / 1.15 = 4.3478
-          // Tax = 0.6521
-          // Total = 5.00
-          // We modify the 'precio' variable used for calculation here
-          // Note: 'precio' incoming is unit price.
-        }
-
-        const porcentaje_iva = hasIva ? 15 : 0;
-
-        // Recalculate values if Delivery (Inclusive)
-        let calcPrice = precio;
-        if (isDelivery && hasIva) {
-          calcPrice = precio / 1.15;
-        }
+        // Delivery y la Torta Personalizada se cotizan con el IVA ya dentro: el
+        // precio tecleado es lo que paga el cliente, así que la base se calcula
+        // hacia atrás y el total de la línea vuelve a dar ese mismo valor.
+        const ivaIncluido = isPrecioIvaIncluido(p);
+        const calcPrice = ivaIncluido ? precio / 1.15 : precio;
 
         // Apply Discount Logic (Courtesy = 100%)
         let discountPercentage = p.isCourtesy ? 100 : 0;
@@ -935,11 +939,11 @@ export class ContificoService {
       const detalles = orderData.products.map((p: any) => {
         const cantidad = Number(p.quantity);
         const precio = Number(p.price);
-        const isDelivery = p.name.toLowerCase().includes('delivery');
+        const ivaIncluido = isPrecioIvaIncluido(p);
         const porcentaje_iva = 15; // Siempre 15% (Ecuador 2024+)
 
         let calcPrice = precio;
-        if (isDelivery) calcPrice = precio / 1.15;
+        if (ivaIncluido) calcPrice = precio / 1.15;
 
         let discountPercentage = p.isCourtesy ? 100 : 0;
         if (orderData.isGlobalCourtesy) {

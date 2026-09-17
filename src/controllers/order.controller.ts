@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from "express";
 import { CONTIFICO_CUENTA_BANCARIA_TRA } from "../config/contifico-cobro.config";
+import { isPrecioIvaIncluido } from "../config/precio-final.config";
 import { HttpStatusCode } from "axios";
 import { models } from "../models";
 import { ContificoService } from "../services/contifico.service";
@@ -189,8 +190,9 @@ export async function createOrder(req: AuthRequest, res: Response, next: NextFun
           if (orderData.globalDiscountPercentage > 0 && discount < 100) {
             discount = orderData.globalDiscountPercentage;
           }
-          const isDelivery = p.name.toLowerCase().includes('delivery');
-          if (isDelivery) return sum;
+          // El precio de delivery y de la Torta Personalizada ya trae el IVA dentro,
+          // así que no se le suma nada encima (ver precio-final.config.ts).
+          if (isPrecioIvaIncluido(p)) return sum;
 
           const itemTotal = (Number(p.price) * Number(p.quantity)) * ((100 - discount) / 100);
           return sum + (itemTotal * 0.15);
