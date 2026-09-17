@@ -10,6 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Watch compile:** `pnpm compile` (tsc --watch)
 - **Format:** `pnpm format` (Prettier)
 - **Seed users:** `pnpm seed:users`
+- **Seed vendedores:** `pnpm seed:sellers` (`-- --source sucree`, `-- --dry-run`)
 - **No test runner is configured.**
 
 ## Tech Stack
@@ -65,6 +66,8 @@ All routes are mounted under `/api` prefix. The flow is:
 - **Contífico service** (`src/services/contifico.service.ts`) — External ERP integration with in-memory cache (1h TTL for products/categories). Credentials: `CONTIFICO_API_KEY`, `CONTIFICO_TOKEN`
 - **Numeración de facturas** — El número sale de `nextInvoiceNumber()`: serie fija (001-001 = CDP) + contador atómico en Mongo (`InvoiceSequence`). El contador continúa la secuencia real de la serie: se siembra/corrige con `pnpm seed:invoice-sequence -- --desde 14/01/2026` (máximo entre Mongo y todo el historial de Contífico). La re-sincronización automática sólo sube el contador (`$max`); bajarlo es manual (`--force`). Los secuenciales del rango `CONTIFICO_SECUENCIALES_EXCLUIDOS` (1000001–1000010, las 10 facturas del 07–08/09/2026) se saltan al asignar y se ignoran al leer Contífico. Historia completa en `src/config/contifico-emision.config.ts`.
 - **Vendedor en la factura** — `resolveVendedorPayload()` mapea el pedido a una persona `es_vendedor` de Contífico (catálogo `Seller`, expuesto en `/api/sellers`) y lo envía como `vendedor_id`. Es la base del reporte de comisiones.
+- **Catálogo de vendedores** — `sellers` se siembra desde las personas `es_vendedor` de cada cuenta con `pnpm seed:sellers -- --source <nicole|sucree>`. `createOrder` valida la cédula filtrando por `contificoSource`, así que un vendedor de Nicole en un pedido de Sucree devuelve 400; el selector del frontend filtra por la cuenta del carrito.
+- **Precio con IVA incluido** — Los productos listados en `src/config/precio-final.config.ts` (Delivery y la Torta Personalizada de Sucree, `TORT-001`) se cotizan a precio final: la base se calcula hacia atrás (`precio / 1.15`) y el total de la factura da exactamente el valor tecleado. El frontend replica la lista en `src/constants/pricing.ts`.
 - **File uploads** — Multer middleware saves to `uploads/` dir with unique filenames (100MB limit, max 10 files)
 - **Startup** — `index.ts` connects to MongoDB, seeds default users, then starts the HTTP server (10min timeout)
 
