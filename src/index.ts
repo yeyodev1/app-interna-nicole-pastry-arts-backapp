@@ -31,16 +31,21 @@ async function seedBranches() {
  * personas ya existen ahí con `es_vendedor: true`.
  */
 const DEFAULT_SELLERS = [
-  { name: "NOHELIA ARMAS BUSTOS",            identification: "0953691706", contificoPersonId: "BXdL8RlNmC231dJZ", sortOrder: 1 },
-  { name: "FIALHO VARGAS FLAVIO FERNANDO",   identification: "0926710666", contificoPersonId: "y7aAPx7yoF5RWegZ", sortOrder: 2 },
-  { name: "DOMENICA SOLANGE AVILES ROBIN",   identification: "0955801303", contificoPersonId: "jZdyrArWAc34MeJ4", sortOrder: 3 },
-  { name: "REBECCA MARCELA PINTO PIVAQUE",   identification: "0950639427", contificoPersonId: "XKdwjgAjoFnN1bgW", sortOrder: 4 },
+  { source: "nicole" as const, name: "NOHELIA ARMAS BUSTOS",          identification: "0953691706", contificoPersonId: "BXdL8RlNmC231dJZ", sortOrder: 1 },
+  { source: "nicole" as const, name: "FIALHO VARGAS FLAVIO FERNANDO", identification: "0926710666", contificoPersonId: "y7aAPx7yoF5RWegZ", sortOrder: 2 },
+  { source: "nicole" as const, name: "DOMENICA SOLANGE AVILES ROBIN", identification: "0955801303", contificoPersonId: "jZdyrArWAc34MeJ4", sortOrder: 3 },
+  { source: "nicole" as const, name: "REBECCA MARCELA PINTO PIVAQUE", identification: "0950639427", contificoPersonId: "XKdwjgAjoFnN1bgW", sortOrder: 4 },
+  // Sucree es otra empresa en Contífico y `createOrder` valida la cédula filtrando
+  // por `contificoSource`. Sin estos dos, ningún pedido de Sucree con vendedor
+  // asignado se podía guardar: devolvía 400 (roto del 31/08 al 17/09/2026).
+  { source: "sucree" as const, name: "Joel Mendoza",                  identification: "1351257298", contificoPersonId: "KVeZVL6Zs5AgWe8P", sortOrder: 1 },
+  { source: "sucree" as const, name: "Maria Fernanda Sampedro",       identification: "0927747618", contificoPersonId: "Ejb2v5lohpW3DbVN", sortOrder: 2 },
 ];
 
 async function seedSellers() {
   for (const seller of DEFAULT_SELLERS) {
     await SellerModel.updateOne(
-      { contificoSource: "nicole", identification: seller.identification },
+      { contificoSource: seller.source, identification: seller.identification },
       {
         // El nombre y el ID de Contífico se refrescan siempre para que un cambio
         // en el ERP no deje al catálogo apuntando a una persona equivocada.
@@ -49,7 +54,7 @@ async function seedSellers() {
           contificoPersonId: seller.contificoPersonId,
           sortOrder: seller.sortOrder,
         },
-        $setOnInsert: { contificoSource: "nicole", identification: seller.identification, isActive: true },
+        $setOnInsert: { contificoSource: seller.source, identification: seller.identification, isActive: true },
       },
       { upsert: true }
     );
